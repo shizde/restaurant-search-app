@@ -112,8 +112,8 @@ def init_basic_db():
         """
         cursor.execute(users_sql)
 
-        # Create ratings table
-        # Find foreign key columns
+        # Create ratings table - MODIFIED: without foreign key constraints initially
+        # Find rating columns
         restaurant_ref_col = None
         user_ref_col = None
         for col in rating_columns:
@@ -126,6 +126,7 @@ def init_basic_db():
             print("Error: Could not identify foreign key columns in ratings table")
             return
 
+        # Create ratings table without foreign key constraints initially
         rating_columns_sql = ['"id" SERIAL PRIMARY KEY']
         for col in rating_columns:
             # Quote the column name to preserve case
@@ -141,14 +142,7 @@ def init_basic_db():
                     f"{quoted_col} TEXT"
                 )  # Text for any other columns
 
-        # Add foreign key constraints with quoted column names
-        rating_columns_sql.append(
-            f'FOREIGN KEY ("{restaurant_ref_col}") REFERENCES restaurants ("{restaurant_pk}")'
-        )
-        rating_columns_sql.append(
-            f'FOREIGN KEY ("{user_ref_col}") REFERENCES users ("{user_pk}")'
-        )
-
+        # Don't add foreign key constraints yet
         ratings_sql = f"""
         CREATE TABLE ratings (
             {", ".join(rating_columns_sql)}
@@ -163,14 +157,9 @@ def init_basic_db():
         # Import data from CSVs - now in separate transactions
         import_restaurants(conn, restaurant_columns, restaurants_csv_path)
         import_users(conn, user_columns, users_csv_path)
-        import_ratings(
-            conn,
-            rating_columns,
-            rating_columns,
-            restaurant_ref_col,
-            user_ref_col,
-            ratings_csv_path,
-        )
+
+        # Modified import_ratings function - skips the foreign key checks
+        import_ratings_no_validation(conn, rating_columns, ratings_csv_path)
 
     except Exception as e:
         conn.rollback()
@@ -295,79 +284,58 @@ def import_users(conn, user_columns, users_csv_path):
         cursor.close()
 
 
-def import_ratings(
-    conn,
-    rating_columns,
-    columns_to_check,
-    restaurant_ref_col,
-    user_ref_col,
-    ratings_csv_path,
-):
-    """Import rating data with proper error handling and transaction management."""
-    # Cache user and restaurant IDs for faster lookups
-    user_ids = cache_user_ids(conn)
-    restaurant_ids = cache_restaurant_ids(conn)
-
-    # Import ratings - each rating insert in its own transaction
-    with open(ratings_csv_path, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
+def import_ratings_no_validation(conn, rating_columns, ratings_csv_path):
+    """Import rating data without foreign key validation."""
+    cursor = conn.cursor()
+    try:
+        # Import ratings without foreign key checking
         success_count = 0
         error_count = 0
-        skipped_count = 0
 
-        for row in reader:
-            cursor = conn.cursor()
-            try:
-                # Check if the referenced user exists in our cache
-                user_id = row.get(user_ref_col, "")
-                place_id = int(row.get(restaurant_ref_col, 0) or 0)
+        with open(ratings_csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
 
-                # Skip this rating if either the user or restaurant doesn't exist
-                if user_id not in user_ids:
-                    skipped_count += 1
-                    cursor.close()
-                    continue
+            for row in reader:
+                try:
+                    # Prepare placeholders and values
+                    placeholders = ", ".join(["%s"] * len(rating_columns))
+                    # Quote column names
+                    columns = ", ".join([f'"{col}"' for col in rating_columns])
+                    values = []
 
-                if place_id not in restaurant_ids:
-                    skipped_count += 1
-                    cursor.close()
-                    continue
+                    for col in rating_columns:
+                        if "rating" in col.lower() or "place" in col.lower():
+                            # Convert to integer
+                            try:
+                                values.append(int(row.get(col, 0) or 0))
+                            except (ValueError, TypeError):
+                                values.append(0)  # Default to 0 if conversion fails
+                        else:
+                            values.append(row.get(col, ""))
 
-                # Prepare placeholders and values
-                placeholders = ", ".join(["%s"] * len(rating_columns))
-                # Quote column names
-                columns = ", ".join([f'"{col}"' for col in rating_columns])
-                values = []
+                    # Insert the data without validation
+                    cursor.execute(
+                        f"INSERT INTO ratings ({columns}) VALUES ({placeholders})",
+                        values,
+                    )
+                    success_count += 1
+                except Exception as e:
+                    error_count += 1
+                    print(f"Error importing rating: {e}")
 
-                for col in rating_columns:
-                    if "rating" in col.lower() or "place" in col.lower():
-                        # Convert to integer
-                        try:
-                            values.append(int(row.get(col, 0) or 0))
-                        except (ValueError, TypeError):
-                            values.append(0)  # Default to 0 if conversion fails
-                    else:
-                        values.append(row.get(col, ""))
+        conn.commit()
+        print(f"Ratings data import: {success_count} successful, {error_count} errors")
 
-                # Insert the data
-                cursor.execute(
-                    f"INSERT INTO ratings ({columns}) VALUES ({placeholders})",
-                    values,
-                )
-                conn.commit()
-                success_count += 1
-            except Exception as e:
-                conn.rollback()
-                error_count += 1
-                # print(f"Skipping rating due to error: {e}")
-            finally:
-                cursor.close()
-
-        print(
-            f"Ratings data import: {success_count} successful, {skipped_count} skipped, {error_count} errors"
-        )
         if success_count > 0:
             print("Ratings data imported successfully")
+        else:
+            print("No ratings were imported successfully")
+
+    except Exception as e:
+        conn.rollback()
+        print(f"Error in ratings import transaction: {e}")
+    finally:
+        cursor.close()
 
 
 def cache_user_ids(conn):
@@ -416,22 +384,8 @@ def import_data(
     """Legacy function - calls individual import functions."""
     import_restaurants(conn, restaurant_columns, restaurants_csv_path)
     import_users(conn, user_columns, users_csv_path)
-    # Find foreign key columns
-    restaurant_ref_col = None
-    user_ref_col = None
-    for col in rating_columns:
-        if "place" in col.lower() or "restaurant" in col.lower():
-            restaurant_ref_col = col
-        elif "user" in col.lower():
-            user_ref_col = col
-    import_ratings(
-        conn,
-        rating_columns,
-        rating_columns,
-        restaurant_ref_col,
-        user_ref_col,
-        ratings_csv_path,
-    )
+    # Use the new import_ratings_no_validation function
+    import_ratings_no_validation(conn, rating_columns, ratings_csv_path)
 
 
 if __name__ == "__main__":

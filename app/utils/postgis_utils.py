@@ -25,10 +25,10 @@ def initialize_postgis_indexes():
             ADD COLUMN geom geometry(Point, 4326);
             """)
 
-        # Update the geometry from lat/lng
+        # Update the geometry from lat/lng - using proper capitalized column names
         cursor.execute("""
         UPDATE restaurants
-        SET geom = ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+        SET geom = ST_SetSRID(ST_MakePoint("Longitude", "Latitude"), 4326)
         WHERE geom IS NULL;
         """)
 
