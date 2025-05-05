@@ -67,7 +67,7 @@ def initialize_h3_indexes():
 
         # Update H3 indexes for rows where they are NULL
         cursor.execute("""
-        SELECT restaurant_id, latitude, longitude 
+        SELECT "Restaurantid", "Latitude", "Longitude" 
         FROM restaurants 
         WHERE h3_index_res8 IS NULL OR h3_index_res9 IS NULL OR h3_index_res10 IS NULL
         """)
@@ -84,7 +84,7 @@ def initialize_h3_indexes():
                 """
             UPDATE restaurants
             SET h3_index_res8 = %s, h3_index_res9 = %s, h3_index_res10 = %s
-            WHERE restaurant_id = %s
+            WHERE "Restaurantid" = %s
             """,
                 (h3_index_res8, h3_index_res9, h3_index_res10, restaurant_id),
             )
@@ -158,12 +158,12 @@ def find_nearby_restaurants_h3(lat, lng, radius_km):
     # Query restaurants in these cells and calculate exact distance
     query = f"""
     SELECT *, 
-        (6371 * acos(cos(radians(%s)) * cos(radians(latitude)) * cos(radians(longitude) - 
-        radians(%s)) + sin(radians(%s)) * sin(radians(latitude)))) AS distance 
+        (6371 * acos(cos(radians(%s)) * cos(radians("Latitude")) * cos(radians("Longitude") - 
+        radians(%s)) + sin(radians(%s)) * sin(radians("Latitude")))) AS distance 
     FROM restaurants 
     WHERE {h3_column} IN ({placeholders})
-    AND (6371 * acos(cos(radians(%s)) * cos(radians(latitude)) * cos(radians(longitude) - 
-        radians(%s)) + sin(radians(%s)) * sin(radians(latitude)))) < %s 
+    AND (6371 * acos(cos(radians(%s)) * cos(radians("Latitude")) * cos(radians("Longitude") - 
+        radians(%s)) + sin(radians(%s)) * sin(radians("Latitude")))) < %s 
     ORDER BY distance;
     """
 
