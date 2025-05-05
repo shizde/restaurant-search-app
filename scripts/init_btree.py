@@ -1,5 +1,3 @@
-# scripts/init_btree.py
-
 #!/usr/bin/env python3
 import os
 from app.utils.db_utils import get_db_connection

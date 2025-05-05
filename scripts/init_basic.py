@@ -156,20 +156,22 @@ def init_basic_db():
         """
         cursor.execute(ratings_sql)
 
-        # Import data from CSVs
-        import_data(
+        # Commit the schema changes
+        conn.commit()
+        print("Database schema created successfully based on CSV column names")
+
+        # Import data from CSVs - now in separate transactions
+        import_restaurants(conn, restaurant_columns, restaurants_csv_path)
+        import_users(conn, user_columns, users_csv_path)
+        import_ratings(
             conn,
-            cursor,
-            restaurant_columns,
-            user_columns,
             rating_columns,
-            restaurants_csv_path,
-            users_csv_path,
+            rating_columns,
+            restaurant_ref_col,
+            user_ref_col,
             ratings_csv_path,
         )
 
-        conn.commit()
-        print("Database schema created successfully based on CSV column names")
     except Exception as e:
         conn.rollback()
         print(f"Error initializing database: {e}")
@@ -178,17 +180,9 @@ def init_basic_db():
         conn.close()
 
 
-def import_data(
-    conn,
-    cursor,
-    restaurant_columns,
-    user_columns,
-    rating_columns,
-    restaurants_csv_path,
-    users_csv_path,
-    ratings_csv_path,
-):
-    """Import data from CSV files using detected column structure."""
+def import_restaurants(conn, restaurant_columns, restaurants_csv_path):
+    """Import restaurant data with proper error handling and transaction management."""
+    cursor = conn.cursor()
     try:
         # Import restaurants
         with open(restaurants_csv_path, "r", encoding="utf-8") as f:
@@ -234,7 +228,17 @@ def import_data(
 
         conn.commit()
         print("Restaurants data imported successfully")
+    except Exception as e:
+        conn.rollback()
+        print(f"Error importing restaurant data: {e}")
+    finally:
+        cursor.close()
 
+
+def import_users(conn, user_columns, users_csv_path):
+    """Import user data with proper error handling and transaction management."""
+    cursor = conn.cursor()
+    try:
         # Import users
         with open(users_csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -284,43 +288,150 @@ def import_data(
 
         conn.commit()
         print("Users data imported successfully")
-
-        # Import ratings
-        with open(ratings_csv_path, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                try:
-                    # Prepare placeholders and values
-                    placeholders = ", ".join(["%s"] * len(rating_columns))
-                    # Quote column names
-                    columns = ", ".join([f'"{col}"' for col in rating_columns])
-                    values = []
-
-                    for col in rating_columns:
-                        if "rating" in col.lower() or "place" in col.lower():
-                            # Convert to integer
-                            try:
-                                values.append(int(row.get(col, 0) or 0))
-                            except (ValueError, TypeError):
-                                values.append(0)  # Default to 0 if conversion fails
-                        else:
-                            values.append(row.get(col, ""))
-
-                    # Insert the data
-                    cursor.execute(
-                        f"INSERT INTO ratings ({columns}) VALUES ({placeholders})",
-                        values,
-                    )
-                except Exception as e:
-                    # Skip invalid ratings
-                    print(f"Skipping rating due to error: {e}")
-                    continue
-
-        conn.commit()
-        print("Ratings data imported successfully")
     except Exception as e:
         conn.rollback()
-        print(f"Error importing data: {e}")
+        print(f"Error importing user data: {e}")
+    finally:
+        cursor.close()
+
+
+def import_ratings(
+    conn,
+    rating_columns,
+    columns_to_check,
+    restaurant_ref_col,
+    user_ref_col,
+    ratings_csv_path,
+):
+    """Import rating data with proper error handling and transaction management."""
+    # Cache user and restaurant IDs for faster lookups
+    user_ids = cache_user_ids(conn)
+    restaurant_ids = cache_restaurant_ids(conn)
+
+    # Import ratings - each rating insert in its own transaction
+    with open(ratings_csv_path, "r", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        success_count = 0
+        error_count = 0
+        skipped_count = 0
+
+        for row in reader:
+            cursor = conn.cursor()
+            try:
+                # Check if the referenced user exists in our cache
+                user_id = row.get(user_ref_col, "")
+                place_id = int(row.get(restaurant_ref_col, 0) or 0)
+
+                # Skip this rating if either the user or restaurant doesn't exist
+                if user_id not in user_ids:
+                    skipped_count += 1
+                    cursor.close()
+                    continue
+
+                if place_id not in restaurant_ids:
+                    skipped_count += 1
+                    cursor.close()
+                    continue
+
+                # Prepare placeholders and values
+                placeholders = ", ".join(["%s"] * len(rating_columns))
+                # Quote column names
+                columns = ", ".join([f'"{col}"' for col in rating_columns])
+                values = []
+
+                for col in rating_columns:
+                    if "rating" in col.lower() or "place" in col.lower():
+                        # Convert to integer
+                        try:
+                            values.append(int(row.get(col, 0) or 0))
+                        except (ValueError, TypeError):
+                            values.append(0)  # Default to 0 if conversion fails
+                    else:
+                        values.append(row.get(col, ""))
+
+                # Insert the data
+                cursor.execute(
+                    f"INSERT INTO ratings ({columns}) VALUES ({placeholders})",
+                    values,
+                )
+                conn.commit()
+                success_count += 1
+            except Exception as e:
+                conn.rollback()
+                error_count += 1
+                # print(f"Skipping rating due to error: {e}")
+            finally:
+                cursor.close()
+
+        print(
+            f"Ratings data import: {success_count} successful, {skipped_count} skipped, {error_count} errors"
+        )
+        if success_count > 0:
+            print("Ratings data imported successfully")
+
+
+def cache_user_ids(conn):
+    """Cache all user IDs for faster lookups."""
+    cursor = conn.cursor()
+    user_ids = set()
+    try:
+        cursor.execute('SELECT "Userid" FROM users')
+        for (user_id,) in cursor.fetchall():
+            user_ids.add(user_id)
+        return user_ids
+    except Exception as e:
+        print(f"Error caching user IDs: {e}")
+        return set()
+    finally:
+        cursor.close()
+
+
+def cache_restaurant_ids(conn):
+    """Cache all restaurant IDs for faster lookups."""
+    cursor = conn.cursor()
+    restaurant_ids = set()
+    try:
+        cursor.execute('SELECT "Restaurantid" FROM restaurants')
+        for (restaurant_id,) in cursor.fetchall():
+            restaurant_ids.add(restaurant_id)
+        return restaurant_ids
+    except Exception as e:
+        print(f"Error caching restaurant IDs: {e}")
+        return set()
+    finally:
+        cursor.close()
+
+
+# Legacy function for backward compatibility - replaced with individual import functions
+def import_data(
+    conn,
+    cursor,
+    restaurant_columns,
+    user_columns,
+    rating_columns,
+    restaurants_csv_path,
+    users_csv_path,
+    ratings_csv_path,
+):
+    """Legacy function - calls individual import functions."""
+    import_restaurants(conn, restaurant_columns, restaurants_csv_path)
+    import_users(conn, user_columns, users_csv_path)
+    # Find foreign key columns
+    restaurant_ref_col = None
+    user_ref_col = None
+    for col in rating_columns:
+        if "place" in col.lower() or "restaurant" in col.lower():
+            restaurant_ref_col = col
+        elif "user" in col.lower():
+            user_ref_col = col
+    import_ratings(
+        conn,
+        rating_columns,
+        rating_columns,
+        restaurant_ref_col,
+        user_ref_col,
+        ratings_csv_path,
+    )
 
 
 if __name__ == "__main__":
